@@ -6,7 +6,7 @@ import json
 from flask import Flask
 from threading import Thread
 
-# --- WEB SUNUCUSU (7/24 İÇİN) ---
+# --- WEB SUNUCUSU ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot Aktif!"
@@ -18,11 +18,10 @@ def run():
 def keep_alive():
     Thread(target=run).start()
 
-# --- BOT VE SLASH AYARLARI ---
+# --- BOT AYARLARI ---
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
         intents.members = True
         super().__init__(command_prefix="!", intents=intents)
 
@@ -45,55 +44,51 @@ def save_data(data):
 
 @bot.event
 async def on_ready():
-    print(f'USL Manager Giriş Yaptı: {bot.user}')
+    await bot.change_presence(activity=discord.Game(name="USL Menajerlik"))
+    print(f'Sistem Aktif: {bot.user}')
 
 # --- SLASH KOMUTLARI ---
 
-@bot.tree.command(name="ekle", description="Oyuncuya istatistik ve değer ekler.")
-@app_commands.describe(lig="1: Süper Lig, 2: 1. Lig", tip="gol, asist veya cs")
-async def ekle(interaction: discord.Interaction, üye: discord.Member, tip: str, lig: int):
+@bot.tree.command(name="ekle", description="İstatistik, Piyasa Değeri ve Para ekler.")
+@app_commands.choices(lig=[
+    app_commands.Choice(name="Süper Lig", value=1),
+    app_commands.Choice(name="1. Lig", value=2)
+], tip=[
+    app_commands.Choice(name="Gol", value="gol"),
+    app_commands.Choice(name="Asist", value="asist"),
+    app_commands.Choice(name="Clean Sheet (CS)", value="cs")
+])
+async def ekle(interaction: discord.Interaction, üye: discord.Member, tip: app_commands.Choice[str], lig: app_commands.Choice[int]):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("Yetkiniz yok!", ephemeral=True)
     
     data = load_data()
     uid = str(üye.id)
     if uid not in data:
-        data[uid] = {"isim": üye.display_name, "gol": 0, "asist": 0, "cs": 0, "deger": 0}
+        data[uid] = {"isim": üye.display_name, "gol": 0, "asist": 0, "cs": 0, "deger": 0, "butce": 0}
     
-    carpan = 1 if lig == 1 else 0.5
-    tip = tip.lower()
-    puan = {"gol": 2, "asist": 1, "cs": 3}.get(tip, 0)
+    # Katsayılar (Süper Lig: 1.0, 1. Lig: 0.5)
+    katsayi = 1.0 if lig.value == 1 else 0.5
     
-    if puan == 0:
-        return await interaction.response.send_message("❌ Geçersiz tip! (gol/asist/cs)", ephemeral=True)
+    # Değer ve Para Ayarları (Süper Lig bazlı)
+    ayarlar = {
+        "gol": {"deger": 2, "para": 100000},
+        "asist": {"deger": 1, "para": 50000},
+        "cs": {"deger": 3, "para": 250000}
+    }
+    
+    secilen = ayarlar[tip.value]
+    eklenecek_deger = secilen["deger"] * katsayi
+    eklenecek_para = int(secilen["para"] * katsayi)
 
-    data[uid][tip] += 1
-    data[uid]["deger"] += (puan * carpan)
+    data[uid][tip.value] += 1
+    data[uid]["deger"] += eklenecek_deger
+    data[uid]["butce"] += eklenecek_para
+    
     save_data(data)
-    await interaction.response.send_message(f"✅ {üye.mention} için {tip} eklendi! Yeni Değer: **{data[uid]['deger']}M**")
+    await interaction.response.send_message(f"✅ **{üye.display_name}** ({lig.name})\n⚽ +1 {tip.name} | 📈 +{eklenecek_deger}M Değer | 💵 +{eklenecek_para:,} USL Parası")
 
-@bot.tree.command(name="sil", description="Hatalı girilen istatistiği düşer.")
-@app_commands.describe(lig="1: Süper Lig, 2: 1. Lig", tip="gol, asist veya cs")
-async def sil(interaction: discord.Interaction, üye: discord.Member, tip: str, lig: int):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("Yetkiniz yok!", ephemeral=True)
-    
-    data = load_data()
-    uid = str(üye.id)
-    tip = tip.lower()
-    
-    if uid not in data or data[uid].get(tip, 0) <= 0:
-        return await interaction.response.send_message("❌ Silecek veri bulunamadı!", ephemeral=True)
-
-    carpan = 1 if lig == 1 else 0.5
-    puan = {"gol": 2, "asist": 1, "cs": 3}.get(tip, 0)
-    
-    data[uid][tip] -= 1
-    data[uid]["deger"] -= (puan * carpan)
-    save_data(data)
-    await interaction.response.send_message(f"⚠️ {üye.mention} verisi düzeltildi. Yeni Değer: **{data[uid]['deger']}M**")
-
-@bot.tree.command(name="bilgi", description="Oyuncu istatistiklerini ve piyasa değerini gösterir.")
+@bot.tree.command(name="bilgi", description="Oyuncu profilini görüntüler.")
 async def bilgi(interaction: discord.Interaction, üye: discord.Member = None):
     üye = üye or interaction.user
     data = load_data()
@@ -103,27 +98,50 @@ async def bilgi(interaction: discord.Interaction, üye: discord.Member = None):
         return await interaction.response.send_message("Oyuncu kaydı bulunamadı.", ephemeral=True)
     
     s = data[uid]
-    embed = discord.Embed(title=f"📋 {s['isim']} - Oyuncu Kartı", color=0x3498db)
-    embed.add_field(name="⚽ Gol", value=s["gol"], inline=True)
-    embed.add_field(name="🅰️ Asist", value=s["asist"], inline=True)
-    embed.add_field(name="🛡️ Clean Sheet", value=s["cs"], inline=True)
-    embed.add_field(name="💰 Piyasa Değeri", value=f"{s['deger']}M €", inline=False)
+    embed = discord.Embed(title=f"⚽ {s['isim']} - Teknik Rapor", color=0x1abc9c)
+    embed.add_field(name="🥅 Gol", value=f"**{s['gol']}**", inline=True)
+    embed.add_field(name="👟 Asist", value=f"**{s['asist']}**", inline=True)
+    embed.add_field(name="🧤 CS", value=f"**{s['cs']}**", inline=True)
+    embed.add_field(name="🏷️ Piyasa Değeri", value=f"**{s['deger']}M €**", inline=True)
+    embed.add_field(name="💳 Bütçe", value=f"**{s.get('butce', 0):,} 💸 USL Parası**", inline=True)
+    
     if üye.avatar: embed.set_thumbnail(url=üye.avatar.url)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="siralam", description="En değerli 10 oyuncuyu listeler.")
+@bot.tree.command(name="siralam", description="Piyasa değerine göre Top 10.")
 async def siralam(interaction: discord.Interaction):
     data = load_data()
-    if not data: return await interaction.response.send_message("Henüz kayıtlı oyuncu yok.")
+    if not data: return await interaction.response.send_message("Kayıt yok.")
     
-    # Değere göre büyükten küçüğe sırala
     sorted_data = sorted(data.values(), key=lambda x: x['deger'], reverse=True)[:10]
-    
-    embed = discord.Embed(title="🏆 EN DEĞERLİ 10 OYUNCU (TOP 10)", color=0xf1c40f)
-    for i, user in enumerate(sorted_data, 1):
-        embed.add_field(name=f"{i}. {user['isim']}", value=f"Değer: {user['deger']}M € | G: {user['gol']} A: {user['asist']} CS: {user['cs']}", inline=False)
-    
+    embed = discord.Embed(title="🏆 EN DEĞERLİ 10 OYUNCU", color=0xf1c40f)
+    for i, u in enumerate(sorted_data, 1):
+        embed.add_field(name=f"{i}. {u['isim']}", value=f"Değer: {u['deger']}M € | Para: {u.get('butce',0):,} 💸", inline=False)
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="zenginler", description="En zengin 10 oyuncu.")
+async def zenginler(interaction: discord.Interaction):
+    data = load_data()
+    if not data: return await interaction.response.send_message("Kayıt yok.")
+    
+    sorted_data = sorted(data.values(), key=lambda x: x.get('butce', 0), reverse=True)[:10]
+    embed = discord.Embed(title="💰 PARA BABALARI (TOP 10)", color=0x2ecc71)
+    for i, u in enumerate(sorted_data, 1):
+        embed.add_field(name=f"{i}. {u['isim']}", value=f"Bütçe: {u.get('butce', 0):,} 💸", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="para_duzelt", description="Üyenin bütçesini manuel düzenler.")
+async def para_duzelt(interaction: discord.Interaction, üye: discord.Member, miktar: int):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Yetkiniz yok!", ephemeral=True)
+    
+    data = load_data()
+    uid = str(üye.id)
+    if uid not in data: return await interaction.response.send_message("Kayıt yok.", ephemeral=True)
+    
+    data[uid]["butce"] += miktar
+    save_data(data)
+    await interaction.response.send_message(f"💵 {üye.mention} bütçesi güncellendi. Yeni Bütçe: {data[uid]['butce']:,} 💸")
 
 keep_alive()
 bot.run(os.getenv('DISCORD_TOKEN'))
