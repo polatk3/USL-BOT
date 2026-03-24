@@ -1,15 +1,17 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import json
+import asyncio
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 
 # --- WEB SUNUCUSU ---
 app = Flask('')
 @app.route('/')
-def home(): return "Bot Aktif!"
+def home(): return "USL Aktiflik Sistemi Aktif!"
 
 def run():
     port = int(os.environ.get("PORT", 8080))
@@ -23,11 +25,14 @@ class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
+        intents.message_content = True
+        intents.presences = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         await self.tree.sync()
-        print("Slash komutları senkronize edildi!")
+        self.siralama_guncelle.start()
+        print("Aktiflik Takip Sistemi Başlatıldı!")
 
 bot = MyBot()
 DATA_FILE = "stats.json"
@@ -42,153 +47,81 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w") as f: json.dump(data, f, indent=4)
 
+# --- SEVİYE VE ÖDÜL KONTROLÜ ---
+async def check_level_up(member, old_xp, new_xp, data):
+    old_lvl = (old_xp // 100) + 1 # Her 100 mesajda bir seviye
+    new_lvl = (new_xp // 100) + 1
+    uid = str(member.id)
+
+    if new_lvl > old_lvl:
+        # Seviye Ödülleri
+        oduller = {5: 5.0, 10: 10.0, 20: 20.0, 30: 30.0}
+        ek_deger = oduller.get(new_lvl, 0)
+        
+        data[uid]["deger"] = data[uid].get("deger", 0) + ek_deger
+        
+        # İsim Güncelleme: İsim [Lv.X | XM]
+        try:
+            new_nick = f"{member.display_name.split(' [')[0]} [Lv.{new_lvl} | {data[uid]['deger']}M]"
+            await member.edit(nick=new_nick)
+        except: pass
+
+        return True, new_lvl, ek_deger
+    return False, new_lvl, 0
+
+# --- MESAJ VE AKTİFLİK TAKİBİ ---
+user_last_message = {}
+
 @bot.event
-async def on_ready():
-    await bot.change_presence(activity=discord.Game(name="USL Pro Manager"))
-    print(f'Sistem Aktif: {bot.user}')
+async def on_message(message):
+    if message.author.bot or not message.guild: return
 
-# --- SLASH KOMUTLARI ---
-
-@bot.tree.command(name="ekle", description="İstatistik, Piyasa Değeri ve Para ekler.")
-@app_commands.choices(lig=[
-    app_commands.Choice(name="Süper Lig", value=1),
-    app_commands.Choice(name="1. Lig", value=2)
-], tip=[
-    app_commands.Choice(name="Gol", value="gol"),
-    app_commands.Choice(name="Asist", value="asist"),
-    app_commands.Choice(name="Clean Sheet (CS)", value="cs")
-])
-async def ekle(interaction: discord.Interaction, üye: discord.Member, tip: app_commands.Choice[str], lig: app_commands.Choice[int], miktar: int):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("Yetkiniz yok!", ephemeral=True)
-    
     data = load_data()
-    uid = str(üye.id)
-    if uid not in data:
-        data[uid] = {
-            "isim": üye.display_name, 
-            "s_gol": 0, "s_asist": 0, "s_cs": 0, 
-            "b_gol": 0, "b_asist": 0, "b_cs": 0,
-            "deger": 0, "butce": 0
-        }
-    
-    katsayi = 1.0 if lig.value == 1 else 0.5
-    prefix = "s_" if lig.value == 1 else "b_"
-    key = prefix + tip.value
-
-    # Ayarlar (Süper Lig bazlı)
-    ayarlar = {
-        "gol": {"deger": 2, "para": 100000},
-        "asist": {"deger": 1, "para": 50000},
-        "cs": {"deger": 3, "para": 250000}
-    }
-    
-    secilen = ayarlar[tip.value]
-    eklenecek_deger = (secilen["deger"] * katsayi) * miktar
-    eklenecek_para = int((secilen["para"] * katsayi) * miktar)
-
-    data[uid][key] += miktar
-    data[uid]["deger"] += eklenecek_deger
-    data[uid]["butce"] += eklenecek_para
-    
-    save_data(data)
-    await interaction.response.send_message(f"✅ **{üye.display_name}** ({lig.name})\n⚽ +{miktar} {tip.name} | 📈 +{eklenecek_deger}M Değer | 💵 +{eklenecek_para:,} USL Parası")
-
-@bot.tree.command(name="sil", description="İstatistik siler, değer ve bütçeyi geri düşer.")
-@app_commands.choices(lig=[
-    app_commands.Choice(name="Süper Lig", value=1),
-    app_commands.Choice(name="1. Lig", value=2)
-], tip=[
-    app_commands.Choice(name="Gol", value="gol"),
-    app_commands.Choice(name="Asist", value="asist"),
-    app_commands.Choice(name="Clean Sheet (CS)", value="cs")
-])
-async def sil(interaction: discord.Interaction, üye: discord.Member, tip: app_commands.Choice[str], lig: app_commands.Choice[int], miktar: int):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("Yetkiniz yok!", ephemeral=True)
-    
-    data = load_data()
-    uid = str(üye.id)
-    prefix = "s_" if lig.value == 1 else "b_"
-    key = prefix + tip.value
-
-    if uid not in data or data[uid].get(key, 0) < miktar:
-        return await interaction.response.send_message("❌ Silecek kadar veri bulunamadı!", ephemeral=True)
-
-    katsayi = 1.0 if lig.value == 1 else 0.5
-    ayarlar = {
-        "gol": {"deger": 2, "para": 100000},
-        "asist": {"deger": 1, "para": 50000},
-        "cs": {"deger": 3, "para": 250000}
-    }
-    
-    secilen = ayarlar[tip.value]
-    dusecek_deger = (secilen["deger"] * katsayi) * miktar
-    dusecek_para = int((secilen["para"] * katsayi) * miktar)
-
-    data[uid][key] -= miktar
-    data[uid]["deger"] -= dusecek_deger
-    data[uid]["butce"] -= dusecek_para
-    
-    save_data(data)
-    await interaction.response.send_message(f"⚠️ **{üye.display_name}** verisi silindi.\n❌ -{miktar} {tip.name} | 📈 -{dusecek_deger}M Değer | 💵 -{dusecek_para:,} USL Parası")
-
-@bot.tree.command(name="bilgi", description="Oyuncunun detaylı profilini görüntüler.")
-async def bilgi(interaction: discord.Interaction, üye: discord.Member = None):
-    üye = üye or interaction.user
-    data = load_data()
-    uid = str(üye.id)
+    uid = str(message.author.id)
     
     if uid not in data:
-        return await interaction.response.send_message("Oyuncu kaydı bulunamadı.", ephemeral=True)
-    
-    s = data[uid]
-    embed = discord.Embed(title=f"⚽ {s['isim']} - Kariyer Raporu", color=0x3498db)
-    
-    # Süper Lig Kısmı
-    s_bilgi = f"🥅 G: **{s.get('s_gol',0)}** | 👟 A: **{s.get('s_asist',0)}** | 🧤 CS: **{s.get('s_cs',0)}**"
-    embed.add_field(name="🏆 Süper Lig İstatistikleri", value=s_bilgi, inline=False)
-    
-    # 1. Lig Kısmı
-    b_bilgi = f"🥅 G: **{s.get('b_gol',0)}** | 👟 A: **{s.get('b_asist',0)}** | 🧤 CS: **{s.get('b_cs',0)}**"
-    embed.add_field(name="🥇 1. Lig İstatistikleri", value=b_bilgi, inline=False)
-    
-    # Genel Toplamlar ve Ekonomi
-    embed.add_field(name="🏷️ Piyasa Değeri", value=f"**{s['deger']}M €**", inline=True)
-    embed.add_field(name="💳 Mevcut Bütçe", value=f"**{s.get('butce',0):,} 💸 USL Parası**", inline=True)
-    
-    if üye.avatar: embed.set_thumbnail(url=üye.avatar.url)
-    await interaction.response.send_message(embed=embed)
+        data[uid] = {"isim": message.author.display_name, "xp": 0, "deger": 0, "mesaj_sayisi": 0, "aktif_sure": 0}
 
-@bot.tree.command(name="siralam_super", description="Süper Lig'in en değerli oyuncuları.")
-async def siralam_super(interaction: discord.Interaction):
-    data = load_data()
-    if not data: return await interaction.response.send_message("Kayıt yok.")
-    # Sadece Süper Lig golü olanları filtreleyebiliriz ama burası Piyasa Değeri odaklı.
-    sorted_data = sorted(data.values(), key=lambda x: x['deger'], reverse=True)[:10]
-    embed = discord.Embed(title="🏆 Süper Lig - EN DEĞERLİ 10 (Genel)", color=0xf1c40f)
-    for i, u in enumerate(sorted_data, 1):
-        # Profilinde Süper Lig verisi olanları gösterelim.
-        if u.get('s_gol', 0) > 0 or u.get('s_asist', 0) > 0:
-            val = f"Değer: **{u['deger']}M €** | G:{u.get('s_gol')} A:{u.get('s_asist')} CS:{u.get('s_cs')}"
-            embed.add_field(name=f"{i}. {u['isim']}", value=val, inline=False)
-    await interaction.response.send_message(embed=embed)
+    old_xp = data[uid].get("xp", 0)
+    data[uid]["xp"] += 1
+    data[uid]["mesaj_sayisi"] += 1
+    
+    # Seviye atladı mı bak
+    is_up, lvl, odul = await check_level_up(message.author, old_xp, data[uid]["xp"], data)
+    
+    if is_up:
+        await message.channel.send(f"🎊 **TEBRİKLER {message.author.mention}!** Seviye atladın: **Level {lvl}**! Hesabına **{odul}M Değer** eklendi.")
 
-@bot.tree.command(name="siralam_birinci", description="1. Lig'in en değerli oyuncuları.")
-async def siralam_birinci(interaction: discord.Interaction):
-    data = load_data()
-    if not data: return await interaction.response.send_message("Kayıt yok.")
-    sorted_data = sorted(data.values(), key=lambda x: x['deger'], reverse=True)[:10]
-    embed = discord.Embed(title="🏆 1. Lig - EN DEĞERLİ 10 (Genel)", color=0xf39c12)
-    for i, u in enumerate(sorted_data, 1):
-        # Profilinde 1. Lig verisi olanları gösterelim.
-        if u.get('b_gol', 0) > 0 or u.get('b_asist', 0) > 0:
-            val = f"Değer: **{u['deger']}M €** | G:{u.get('b_gol')} A:{u.get('b_asist')} CS:{u.get('b_cs')}"
-            embed.add_field(name=f"{i}. {u['isim']}", value=val, inline=False)
-    await interaction.response.send_message(embed=embed)
+    save_data(data)
+
+# --- AKTİFLİK SIRALAMASI PANOSU ---
+@tasks.loop(minutes=10)
+async def siralama_guncelle():
+    for guild in bot.guilds:
+        channel = discord.utils.get(guild.text_channels, name="aktiflik-siralamasi")
+        if not channel: continue
+
+        data = load_data()
+        # En çok mesaj atana göre sırala (İlk 10)
+        sorted_users = sorted(data.items(), key=lambda x: x[1].get('xp', 0), reverse=True)[:10]
+
+        embed = discord.Embed(title="📊 USL AKTİFLİK SIRALAMASI (TOP 10)", color=0x3498db, timestamp=datetime.utcnow())
+        
+        description = ""
+        for i, (uid, info) in enumerate(sorted_users, 1):
+            lvl = (info.get('xp', 0) // 100) + 1
+            description += f"**{i}.** <@{uid}> - **Lv.{lvl}** | ✉️ {info.get('mesaj_sayisi')} Mesaj | 🏷️ {info.get('deger')}M\n"
+        
+        embed.description = description
+        embed.set_footer(text="Bu liste her 10 dakikada bir güncellenir.")
+
+        # Eski mesajı silip yenisini atma veya güncelleme
+        async for msg in channel.history(limit=5):
+            if msg.author == bot.user:
+                await msg.edit(embed=embed)
+                break
+        else:
+            await channel.send(embed=embed)
 
 keep_alive()
 bot.run(os.getenv('DISCORD_TOKEN'))
-    
-    
-    
