@@ -1,23 +1,25 @@
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 import os
 import json
-import asyncio
 from flask import Flask
 from threading import Thread
 
-# --- WEB SUNUCUSU ---
+# --- RENDER İÇİN ÖZEL WEB SUNUCUSU ---
 app = Flask('')
+
 @app.route('/')
-def home(): return "USL Tüm Sistemler Aktif!"
+def home():
+    return "USL Bot 7/24 Aktif!"
 
 def run():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    # Render genellikle 10000 portunu kullanır
+    app.run(host='0.0.0.0', port=10000)
 
 def keep_alive():
-    Thread(target=run).start()
+    t = Thread(target=run)
+    t.start()
 
 # --- BOT AYARLARI ---
 class MyBot(commands.Bot):
@@ -29,12 +31,13 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        print("Tüm komutlar ve görevler aktif!")
+        print("Tüm komutlar senkronize edildi!")
 
 bot = MyBot()
 DATA_FILE = "stats.json"
 YETKILI_ROL_ISMI = "Değer Yetkilisi"
 
+# Veri Fonksiyonları
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -48,7 +51,7 @@ def save_data(data):
 def is_yetkili(interaction: discord.Interaction):
     return any(role.name == YETKILI_ROL_ISMI for role in interaction.user.roles) or interaction.user.guild_permissions.administrator
 
-# --- AKTİFLİK TAKİBİ (XP) ---
+# --- AKTİFLİK VE KOMUTLAR ---
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild: return
@@ -56,14 +59,11 @@ async def on_message(message):
     uid = str(message.author.id)
     if uid not in data:
         data[uid] = {"isim": message.author.display_name, "deger": 0.0, "butce": 0, "xp": 0, "s_gol": 0, "s_asist": 0, "s_cs": 0, "b_gol": 0, "b_asist": 0, "b_cs": 0}
-    
     data[uid]["xp"] = data[uid].get("xp", 0) + 1
     save_data(data)
     await bot.process_commands(message)
 
-# --- KOMUTLAR ---
-
-@bot.tree.command(name="kurulum", description="Gerekli sistemi hazırlar.")
+@bot.tree.command(name="kurulum", description="Sistemi hazırlar.")
 async def kurulum(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator: return
     role = discord.utils.get(interaction.guild.roles, name=YETKILI_ROL_ISMI)
@@ -71,7 +71,7 @@ async def kurulum(interaction: discord.Interaction):
         await interaction.guild.create_role(name=YETKILI_ROL_ISMI, color=discord.Color.red())
         await interaction.response.send_message(f"✅ **{YETKILI_ROL_ISMI}** rolü oluşturuldu.")
     else:
-        await interaction.response.send_message("ℹ️ Sistem zaten kurulu.", ephemeral=True)
+        await interaction.response.send_message("ℹ️ Sistem hazır.", ephemeral=True)
 
 @bot.tree.command(name="deger_ver", description="İstatistik ve ekonomi ekler.")
 @app_commands.choices(lig=[app_commands.Choice(name="Süper Lig", value="super"), app_commands.Choice(name="1. Lig", value="birinci")],
@@ -81,7 +81,7 @@ async def deger_ver(interaction: discord.Interaction, oyuncu: discord.Member, li
     data = load_data()
     uid = str(oyuncu.id)
     if uid not in data: data[uid] = {"isim": oyuncu.display_name, "deger": 0.0, "butce": 0, "xp": 0, "s_gol": 0, "s_asist": 0, "s_cs": 0, "b_gol": 0, "b_asist": 0, "b_cs": 0}
-
+    
     katsayilar = {"gol": {"deger": 3.0, "para": 100000}, "asist": {"deger": 1.5, "para": 50000}, "cs": {"deger": 6.0, "para": 200000}}
     carpan = 1.0 if lig.value == "super" else 0.5
     prefix = "s_" if lig.value == "super" else "b_"
@@ -92,7 +92,7 @@ async def deger_ver(interaction: discord.Interaction, oyuncu: discord.Member, li
     save_data(data)
     await interaction.response.send_message(f"✅ {oyuncu.display_name} için {miktar} {tur.name} işlendi.")
 
-@bot.tree.command(name="deger_sil", description="Hatalı girilen istatistiği siler.")
+@bot.tree.command(name="deger_sil", description="Hatalı veriyi siler.")
 @app_commands.choices(lig=[app_commands.Choice(name="Süper Lig", value="super"), app_commands.Choice(name="1. Lig", value="birinci")],
                       tur=[app_commands.Choice(name="Gol", value="gol"), app_commands.Choice(name="Asist", value="asist"), app_commands.Choice(name="CS", value="cs")])
 async def deger_sil(interaction: discord.Interaction, oyuncu: discord.Member, lig: app_commands.Choice[str], tur: app_commands.Choice[str], miktar: int):
@@ -101,17 +101,17 @@ async def deger_sil(interaction: discord.Interaction, oyuncu: discord.Member, li
     uid = str(oyuncu.id)
     prefix = "s_" if lig.value == "super" else "b_"
     if uid not in data or data[uid].get(prefix+tur.value, 0) < miktar:
-        return await interaction.response.send_message("Silecek veri bulunamadı!", ephemeral=True)
-
+        return await interaction.response.send_message("Silecek veri yok!", ephemeral=True)
+    
     katsayilar = {"gol": {"deger": 3.0, "para": 100000}, "asist": {"deger": 1.5, "para": 50000}, "cs": {"deger": 6.0, "para": 200000}}
     carpan = 1.0 if lig.value == "super" else 0.5
     data[uid][prefix + tur.value] -= miktar
     data[uid]["deger"] -= (katsayilar[tur.value]["deger"] * carpan) * miktar
     data[uid]["butce"] -= int((katsayilar[tur.value]["para"] * carpan) * miktar)
     save_data(data)
-    await interaction.response.send_message(f"⚠️ {oyuncu.display_name} üzerinden {miktar} {tur.name} silindi.")
+    await interaction.response.send_message(f"⚠️ {oyuncu.display_name} verileri silindi.")
 
-@bot.tree.command(name="profil", description="Detaylı oyuncu profili.")
+@bot.tree.command(name="profil", description="Oyuncu profili.")
 async def profil(interaction: discord.Interaction, oyuncu: discord.Member = None):
     target = oyuncu or interaction.user
     data = load_data()
@@ -124,8 +124,8 @@ async def profil(interaction: discord.Interaction, oyuncu: discord.Member = None
     embed.add_field(name="📊 DURUM", value=f"Değer: `{s['deger']}M €` | Bütçe: `{s['butce']:,}` | Aktiflik: `{s.get('xp',0)} msj`", inline=False)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="siralamalar", description="En iyileri listeler.")
-@app_commands.choices(tur=[app_commands.Choice(name="En Değerliler", value="deger"), app_commands.Choice(name="En Aktifler (Mesaj)", value="xp")])
+@bot.tree.command(name="siralamalar", description="En iyiler.")
+@app_commands.choices(tur=[app_commands.Choice(name="En Değerliler", value="deger"), app_commands.Choice(name="En Aktifler", value="xp")])
 async def siralamalar(interaction: discord.Interaction, tur: app_commands.Choice[str]):
     data = load_data()
     sorted_list = sorted(data.items(), key=lambda x: x[1].get(tur.value, 0), reverse=True)[:10]
@@ -137,7 +137,7 @@ async def siralamalar(interaction: discord.Interaction, tur: app_commands.Choice
     embed.description = desc
     await interaction.response.send_message(embed=embed)
 
+# --- ÇALIŞTIR ---
 keep_alive()
 bot.run(os.getenv('DISCORD_TOKEN'))
-
-    
+                                     
