@@ -4,14 +4,16 @@ from flask import Flask
 from threading import Thread
 import os
 
-# 7/24 uyanık kalma sistemi
+# Render'ın botu kapatmaması için gerekli web sunucusu
 app = Flask('')
 @app.route('/')
 def home():
     return "Bot Aktif!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # Render'ın zorunlu kıldığı PORT ayarı
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
@@ -24,16 +26,21 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'Bot başarıyla açıldı: {bot.user}')
+    print(f'BOT BASARIYLA ACILDI: {bot.user}')
 
 @bot.command()
 async def selam(ctx):
-    await ctx.send('Selam! Bot şu an Render üzerinden 7/24 aktif.')
+    await ctx.send('Selam! Bot şu an 7/24 aktif.')
 
-# Sistemi başlat
-keep_alive()
-
-# Tokenı kodun içine yazmıyoruz, Render'daki gizli kısımdan çekecek
-token = os.getenv('DISCORD_TOKEN')
-bot.run(token)
-
+# Önce web sunucusunu, sonra botu başlatıyoruz
+if __name__ == "__main__":
+    keep_alive()
+    token = os.getenv('DISCORD_TOKEN')
+    if token:
+        try:
+            bot.run(token)
+        except Exception as e:
+            print(f"Hata oluştu: {e}")
+    else:
+        print("TOKEN BULUNAMADI! Render Environment ayarlarına bak.")
+        
